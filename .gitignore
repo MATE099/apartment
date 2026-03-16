@@ -1,0 +1,14 @@
+# Dependencies
+node_modules/
+
+# Environment (never commit secrets)
+.env
+
+# Logs and OS
+*.log
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/

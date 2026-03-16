@@ -1,0 +1,835 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Apartments — Tbilisi Saburtalo</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="header">
+    <div class="header-inner">
+      <a href="#" class="logo" data-back="1">
+        <span class="logo-icon">A</span>
+        <span class="logo-text">Apartments</span>
+      </a>
+      <div class="header-right">
+        <nav class="header-nav">
+          <a href="#" data-route="/" class="nav-listings">Listings</a>
+          <a href="#/favorites" class="nav-favorites">Favorites <span class="fav-count" id="fav-count">0</span></a>
+          <a href="#/compare" class="nav-compare">Compare <span class="compare-count" id="compare-count">0</span></a>
+        </nav>
+        <span class="header-tag">Tbilisi · Saburtalo</span>
+      </div>
+    </div>
+  </header>
+  <div id="app"><div class="loading">Loading...</div></div>
+  <div id="compare-bar" class="compare-bar"></div>
+  <footer class="footer">
+    <div class="footer-inner">Apartments — Tbilisi Saburtalo &middot; Renovated listings</div>
+  </footer>
+
+  <script>
+    /* ─── Helpers ─── */
+    function el(tag, attrs, ...kids) {
+      const e = document.createElement(tag);
+      if (attrs && typeof attrs === "object" && !Array.isArray(attrs) && !attrs.nodeType) {
+        for (const [k, v] of Object.entries(attrs)) {
+          if (v == null) continue;
+          if (k === "className") e.className = v;
+          else if (k.startsWith("on")) e.addEventListener(k.slice(2).toLowerCase(), v);
+          else e.setAttribute(k, String(v));
+        }
+      } else if (attrs != null) kids.unshift(attrs);
+      for (const c of kids.flat()) {
+        if (c == null || c === false) continue;
+        e.append(typeof c === "object" && c.nodeType ? c : document.createTextNode(String(c)));
+      }
+      return e;
+    }
+
+    function fmt(n) {
+      if (n == null) return null;
+      const num = typeof n === "number" ? n : parseInt(String(n).replace(/\D/g, ""), 10);
+      if (isNaN(num)) return null;
+      return num.toLocaleString("en-US") + " GEL";
+    }
+
+    /** Never show "null" or "undefined" on the page. Use for any API-sourced text. */
+    function safeText(v, fallback) {
+      if (v == null || v === "") return (fallback != null ? fallback : "\u2014");
+      const s = String(v).trim();
+      if (s.toLowerCase() === "null" || s.toLowerCase() === "undefined") return (fallback != null ? fallback : "\u2014");
+      return s || (fallback != null ? fallback : "\u2014");
+    }
+
+    /* SVG placeholder for broken images */
+    function placeholderSvg(text) {
+      return "data:image/svg+xml," + encodeURIComponent(
+        "<svg xmlns='http://www.w3.org/2000/svg' width='400' height='300'>" +
+        "<rect fill='#e8e5e0' width='400' height='300'/>" +
+        "<text fill='#b0ada7' x='50%' y='50%' dominant-baseline='middle' text-anchor='middle' font-size='14'>" +
+        (text || "No photo") + "</text></svg>"
+      );
+    }
+
+    /* ─── API ─── */
+    async function apiGet(path) {
+      const r = await fetch(path);
+      if (!r.ok) throw new Error(r.statusText);
+      return r.json();
+    }
+
+    function buildListingsUrl(params) {
+      const p = new URLSearchParams();
+      if (params.q) p.set("q", params.q);
+      if (params.minPrice != null && params.minPrice !== "") p.set("minPrice", params.minPrice);
+      if (params.maxPrice != null && params.maxPrice !== "") p.set("maxPrice", params.maxPrice);
+      if (params.minArea != null && params.minArea !== "") p.set("minArea", params.minArea);
+      if (params.maxArea != null && params.maxArea !== "") p.set("maxArea", params.maxArea);
+      if (params.rooms) p.set("rooms", params.rooms);
+      if (params.sort) p.set("sort", params.sort);
+      if (params.limit != null) p.set("limit", params.limit);
+      if (params.skip != null) p.set("skip", params.skip);
+      const qs = p.toString();
+      return "/api/listings" + (qs ? "?" + qs : "");
+    }
+
+    /* ─── Favorites & Recently viewed (localStorage) ─── */
+    const FAV_KEY = "apartment_favorites";
+    const RECENT_KEY = "apartment_recent";
+    const RECENT_MAX = 5;
+
+    function getFavorites() {
+      try {
+        const j = localStorage.getItem(FAV_KEY);
+        return j ? new Set(JSON.parse(j)) : new Set();
+      } catch { return new Set(); }
+    }
+    function setFavorites(set) {
+      localStorage.setItem(FAV_KEY, JSON.stringify([...set]));
+      const countEl = document.getElementById("fav-count");
+      if (countEl) countEl.textContent = set.size;
+    }
+    function toggleFavorite(id) {
+      const fav = getFavorites();
+      if (fav.has(id)) fav.delete(id); else fav.add(id);
+      setFavorites(fav);
+      return fav;
+    }
+    function getRecent() {
+      try {
+        const j = localStorage.getItem(RECENT_KEY);
+        return j ? JSON.parse(j) : [];
+      } catch { return []; }
+    }
+    function addRecent(id, listing) {
+      let recent = getRecent().filter((r) => r.id !== id);
+      recent.unshift({ id, title: listing?.title || id, photo: listing?.photos?.[0]?.url });
+      recent = recent.slice(0, RECENT_MAX);
+      localStorage.setItem(RECENT_KEY, JSON.stringify(recent));
+      return recent;
+    }
+
+    /* ─── Compare (max 3, localStorage) ─── */
+    const COMPARE_KEY = "apartment_compare";
+    const COMPARE_MAX = 3;
+    function getCompare() {
+      try {
+        const j = localStorage.getItem(COMPARE_KEY);
+        return j ? JSON.parse(j) : [];
+      } catch { return []; }
+    }
+    function setCompare(ids) {
+      const list = ids.slice(0, COMPARE_MAX);
+      localStorage.setItem(COMPARE_KEY, JSON.stringify(list));
+      const el = document.getElementById("compare-count");
+      if (el) el.textContent = list.length;
+      renderCompareBar();
+      return list;
+    }
+    function toggleCompare(id) {
+      let list = getCompare();
+      const i = list.indexOf(id);
+      if (i >= 0) list = list.filter((_, idx) => idx !== i);
+      else if (list.length < COMPARE_MAX) list = [...list, id];
+      return setCompare(list);
+    }
+    function renderCompareBar() {
+      const bar = document.getElementById("compare-bar");
+      const ids = getCompare();
+      if (ids.length === 0) {
+        bar.classList.remove("visible");
+        document.body.classList.remove("has-compare-bar");
+        return;
+      }
+      document.body.classList.add("has-compare-bar");
+      bar.classList.add("visible");
+      bar.innerHTML = "";
+      const label = document.createElement("span");
+      label.className = "label";
+      label.textContent = "Compare:";
+      bar.appendChild(label);
+      const idWrap = document.createElement("div");
+      idWrap.className = "ids";
+      ids.forEach((id) => {
+        const chip = document.createElement("span");
+        chip.className = "id-chip";
+        chip.textContent = id;
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.textContent = "×";
+        btn.onclick = (e) => { e.preventDefault(); setCompare(getCompare().filter((x) => x !== id)); };
+        chip.appendChild(btn);
+        idWrap.appendChild(chip);
+      });
+      bar.appendChild(idWrap);
+      const clearBtn = document.createElement("button");
+      clearBtn.type = "button";
+      clearBtn.className = "btn-clear";
+      clearBtn.textContent = "Clear";
+      clearBtn.onclick = () => setCompare([]);
+      bar.appendChild(clearBtn);
+      const link = document.createElement("a");
+      link.href = "#/compare";
+      link.className = "btn-compare";
+      link.textContent = "Compare " + ids.length;
+      bar.appendChild(link);
+    }
+
+    /* ─── State ─── */
+    let state = {
+      listings: [],
+      totalCount: 0,
+      sortBy: "newest",
+      filterRooms: "",
+      searchQuery: "",
+      minPrice: "",
+      maxPrice: "",
+      minArea: "",
+      maxArea: "",
+      viewMode: "grid",
+      pageSize: 12,
+      skip: 0,
+    };
+
+    /* ─── "Posted X ago" ─── */
+    function timeAgo(date) {
+      const d = date ? new Date(date) : null;
+      if (!d || isNaN(d.getTime())) return null;
+      const sec = Math.floor((Date.now() - d.getTime()) / 1000);
+      if (sec < 60) return "Just now";
+      if (sec < 3600) return Math.floor(sec / 60) + " min ago";
+      if (sec < 86400) return Math.floor(sec / 3600) + " hours ago";
+      if (sec < 2592000) return Math.floor(sec / 86400) + " days ago";
+      if (sec < 31536000) return Math.floor(sec / 2592000) + " months ago";
+      return Math.floor(sec / 31536000) + " years ago";
+    }
+
+    /* ─── Render search + filters ─── */
+    function renderSearchAndFilters() {
+      const searchWrap = el("div", { className: "search-wrap" });
+      const searchInput = el("input", {
+        type: "text",
+        className: "search-input",
+        placeholder: "Search by title, address, district...",
+        value: state.searchQuery,
+      });
+      let searchTimer;
+      searchInput.oninput = function () {
+        state.searchQuery = this.value.trim();
+        clearTimeout(searchTimer);
+        searchTimer = setTimeout(() => fetchAndRenderList(), 300);
+      };
+
+      const minPriceInput = el("input", { type: "number", placeholder: "Min price", min: 0, value: state.minPrice || "" });
+      const maxPriceInput = el("input", { type: "number", placeholder: "Max price", min: 0, value: state.maxPrice || "" });
+      const minAreaInput = el("input", { type: "number", placeholder: "Min m²", min: 0, value: state.minArea || "" });
+      const maxAreaInput = el("input", { type: "number", placeholder: "Max m²", min: 0, value: state.maxArea || "" });
+      minPriceInput.onchange = () => { state.minPrice = minPriceInput.value; fetchAndRenderList(); };
+      maxPriceInput.onchange = () => { state.maxPrice = maxPriceInput.value; fetchAndRenderList(); };
+      minAreaInput.onchange = () => { state.minArea = minAreaInput.value; fetchAndRenderList(); };
+      maxAreaInput.onchange = () => { state.maxArea = maxAreaInput.value; fetchAndRenderList(); };
+
+      const roomsSelect = el("select", {},
+        el("option", { value: "" }, "All rooms"),
+        el("option", { value: "1" }, "1 room"),
+        el("option", { value: "2" }, "2 rooms"),
+        el("option", { value: "3+" }, "3+ rooms")
+      );
+      roomsSelect.value = state.filterRooms;
+      roomsSelect.onchange = function () { state.filterRooms = this.value; fetchAndRenderList(); };
+
+      const sortSelect = el("select", {},
+        el("option", { value: "newest" }, "Newest"),
+        el("option", { value: "price_asc" }, "Price ↑"),
+        el("option", { value: "price_desc" }, "Price ↓"),
+        el("option", { value: "area_asc" }, "Area ↑"),
+        el("option", { value: "area_desc" }, "Area ↓")
+      );
+      sortSelect.value = state.sortBy;
+      sortSelect.onchange = function () { state.sortBy = this.value; fetchAndRenderList(); };
+
+      const chips = [];
+      if (state.searchQuery) chips.push(el("span", { className: "filter-chip" }, "“" + state.searchQuery + "”", el("button", { type: "button", onclick: () => { state.searchQuery = ""; searchInput.value = ""; fetchAndRenderList(); } }, "×")));
+      if (state.minPrice || state.maxPrice) chips.push(el("span", { className: "filter-chip" }, (state.minPrice || "?") + "–" + (state.maxPrice || "?") + " GEL", el("button", { type: "button", onclick: () => { state.minPrice = state.maxPrice = ""; minPriceInput.value = maxPriceInput.value = ""; fetchAndRenderList(); } }, "×")));
+      if (state.minArea || state.maxArea) chips.push(el("span", { className: "filter-chip" }, (state.minArea || "?") + "–" + (state.maxArea || "?") + " m²", el("button", { type: "button", onclick: () => { state.minArea = state.maxArea = ""; minAreaInput.value = maxAreaInput.value = ""; fetchAndRenderList(); } }, "×")));
+      if (state.filterRooms) chips.push(el("span", { className: "filter-chip" }, state.filterRooms + " room(s)", el("button", { type: "button", onclick: () => { state.filterRooms = ""; roomsSelect.value = ""; fetchAndRenderList(); } }, "×")));
+      if (chips.length) chips.push(el("button", { type: "button", className: "filter-chip", onclick: clearFilters }, "Clear all"));
+
+      const viewToggle = el("div", { className: "view-toggle" });
+      const btnGrid = el("button", { type: "button", "aria-label": "Grid view" }, "⊞");
+      const btnList = el("button", { type: "button", "aria-label": "List view" }, "≡");
+      btnGrid.onclick = () => { state.viewMode = "grid"; renderPage(state.listings); };
+      btnList.onclick = () => { state.viewMode = "list"; renderPage(state.listings); };
+      btnGrid.className = state.viewMode === "grid" ? "active" : "";
+      btnList.className = state.viewMode === "list" ? "active" : "";
+      viewToggle.append(btnGrid, btnList);
+
+      searchWrap.append(searchInput);
+      const filterRow = el("div", { className: "filters-row" },
+        minPriceInput, maxPriceInput, minAreaInput, maxAreaInput,
+        el("label", {}, "Rooms"), roomsSelect,
+        el("label", {}, "Sort"), sortSelect,
+        viewToggle
+      );
+      const chipRow = chips.length ? el("div", { className: "filters-row filters-row-chips" }, ...chips) : null;
+      return el("div", {},
+        searchWrap,
+        el("div", { className: "toolbar" },
+          filterRow,
+          chipRow
+        )
+      );
+    }
+    function clearFilters() {
+      state.searchQuery = state.minPrice = state.maxPrice = state.minArea = state.maxArea = "";
+      state.filterRooms = "";
+      state.sortBy = "newest";
+      state.skip = 0;
+      fetchAndRenderList(false);
+    }
+
+    /* ─── Render list cards ─── */
+    function renderCards(listings, options) {
+      const favorites = getFavorites();
+      const isFavPage = options && options.favoritesPage;
+      if (!listings.length) {
+        return el("div", { className: "empty" },
+          el("div", { className: "empty-icon" }, "\u{1F3E0}"),
+          el("p", { className: "empty-lead" },
+            isFavPage ? "No favorites yet." : (state.searchQuery || state.minPrice || state.maxPrice || state.minArea || state.maxArea || state.filterRooms ? "No listings match your filters." : "No listings found.")),
+          el("p", {}, isFavPage ? "Click the heart on any listing to save it here." : "Try adjusting search or filters.")
+        );
+      }
+
+      const listEl = el("div", { className: "list" + (state.viewMode === "list" ? " list-view" : "") });
+      listings.forEach((l) => {
+        const photo = l.photos && l.photos[0];
+        const thumbUrl = photo ? photo.url : null;
+        const title = safeText(l.title) || ("Listing " + safeText(l.externalId || l._id, "?"));
+        const price = fmt(l.price || l.total_price);
+        const area = (l.area_sqm || l.area) ? (l.area_sqm || l.area) + " m\u00B2" : null;
+        const rooms = l.rooms != null ? l.rooms + " room" + (l.rooms !== 1 ? "s" : "") : null;
+        const id = l.externalId || l._id;
+        const pCount = l.photoCount ?? (l.photos ? l.photos.length : 0);
+        const pricePerSqm = l.pricePerSqm || ((l.price != null && (l.area_sqm || l.area)) ? Math.round(l.price / (l.area_sqm || l.area)) : null);
+        const posted = timeAgo(l.updatedAt);
+        const isFav = favorites.has(id);
+
+        const imgWrap = el("div", { className: "card-img" });
+        const favBtn = el("button", { type: "button", className: "card-fav" + (isFav ? " active" : ""), "aria-label": isFav ? "Remove from favorites" : "Add to favorites" }, isFav ? "♥" : "♡");
+        favBtn.onclick = (e) => { e.preventDefault(); e.stopPropagation(); toggleFavorite(id); renderPage(state.listings, options); };
+        imgWrap.appendChild(favBtn);
+        const compareIds = getCompare();
+        const inCompare = compareIds.includes(id);
+        const compareBtn = el("button", { type: "button", className: "card-compare" + (inCompare ? " active" : ""), "aria-label": inCompare ? "Remove from compare" : "Add to compare" }, inCompare ? "✓ Compare" : "+ Compare");
+        compareBtn.onclick = (e) => { e.preventDefault(); e.stopPropagation(); toggleCompare(id); renderPage(state.listings, options); };
+        imgWrap.appendChild(compareBtn);
+        if (thumbUrl) {
+          const img = el("img", { src: thumbUrl, alt: title, loading: "lazy" });
+          img.onerror = function () { this.onerror = null; this.src = placeholderSvg(safeText(photo.label, "")); };
+          imgWrap.appendChild(img);
+        } else {
+          imgWrap.appendChild(el("div", { className: "no-photo" }, "No photo"));
+        }
+        if (pCount > 0) imgWrap.appendChild(el("span", { className: "card-badge" }, pCount + " photos"));
+
+        const card = el("a", { href: "#/listing/" + encodeURIComponent(id), className: "card" },
+          imgWrap,
+          el("div", { className: "card-body" },
+            price ? el("div", { className: "card-price" }, price) : null,
+            pricePerSqm ? el("div", { className: "card-price-sqm" }, pricePerSqm.toLocaleString() + " GEL/m²") : null,
+            el("div", { className: "card-title" }, title),
+            el("div", { className: "card-meta" },
+              [area, rooms].filter(Boolean).map((t) => el("span", { className: "card-meta-item" }, t))
+            ),
+            posted ? el("div", { className: "card-date" }, "Posted " + posted) : null
+          )
+        );
+        listEl.appendChild(card);
+      });
+      return listEl;
+    }
+
+    /* ─── Render list page ─── */
+    function renderPage(listings, options) {
+      const list = listings != null ? listings : state.listings;
+      const app = document.getElementById("app");
+      app.innerHTML = "";
+      const count = list.length;
+      const total = (options && options.favoritesPage) ? count : state.totalCount;
+      const showPagination = !(options && options.favoritesPage) && total > 0 && state.listings.length >= state.pageSize;
+      const hasMore = state.listings.length < total;
+      app.append(
+        el("h1", { className: "page-title" }, (options && options.favoritesPage) ? "Favorites" : "Renovated Apartments"),
+        el("p", { className: "page-subtitle" }, (options && options.favoritesPage) ? "Your saved listings." : "Search and filter renovated apartments in Tbilisi Saburtalo."),
+        (options && options.favoritesPage) ? null : renderSearchAndFilters(),
+        el("div", { className: "toolbar toolbar-count-row" },
+          el("span", { className: "count" }, total > 0 ? "Showing " + count + " of " + total : count + " listing" + (count !== 1 ? "s" : "")),
+          total > 0 && !(options && options.favoritesPage) ? el("span", { className: "pagination-info" }, "Page size: " + state.pageSize) : null
+        ),
+        renderCards(list, options),
+        hasMore && !(options && options.favoritesPage)
+          ? el("div", { className: "load-more-wrap" },
+              el("button", { type: "button", className: "btn-load-more", id: "btn-load-more", onclick: loadMore }, "Load more")
+            )
+          : null
+      );
+    }
+
+    async function fetchAndRenderList(append) {
+      const app = document.getElementById("app");
+      if (!append) {
+        state.skip = 0;
+        app.innerHTML = "";
+        app.appendChild(renderSkeletonList());
+      }
+      const url = buildListingsUrl({
+        q: state.searchQuery || undefined,
+        minPrice: state.minPrice || undefined,
+        maxPrice: state.maxPrice || undefined,
+        minArea: state.minArea || undefined,
+        maxArea: state.maxArea || undefined,
+        rooms: state.filterRooms || undefined,
+        sort: state.sortBy,
+        limit: state.pageSize,
+        skip: state.skip,
+      });
+      try {
+        const data = await apiGet(url);
+        const listings = data.listings || [];
+        const totalCount = data.totalCount != null ? data.totalCount : listings.length;
+        if (append) {
+          state.listings = [...state.listings, ...listings];
+        } else {
+          state.listings = listings;
+        }
+        state.totalCount = totalCount;
+        renderPage(state.listings);
+      } catch (err) {
+        state.listings = [];
+        state.totalCount = 0;
+        app.innerHTML = "";
+        app.append(
+          el("div", { className: "error" }, "Failed to load: " + err.message),
+          el("button", { className: "btn-retry", onclick: () => fetchAndRenderList(false) }, "Retry")
+        );
+      }
+    }
+    async function loadMore() {
+      const btn = document.getElementById("btn-load-more");
+      if (btn) btn.disabled = true;
+      state.skip = state.listings.length;
+      await fetchAndRenderList(true);
+      if (btn) btn.disabled = false;
+    }
+    function renderSkeletonList() {
+      const n = state.pageSize;
+      const list = el("div", { className: "skeleton-list" });
+      for (let i = 0; i < Math.min(6, n); i++) {
+        const card = el("div", { className: "card skeleton-card" },
+          el("div", { className: "card-img" }, el("div", { className: "skeleton" })),
+          el("div", { className: "card-body" },
+            el("div", { className: "skeleton" }),
+            el("div", { className: "skeleton" }),
+            el("div", { className: "skeleton skeleton-w70" })
+          )
+        );
+        list.appendChild(card);
+      }
+      return list;
+    }
+
+    /* ─── Lightbox ─── */
+    let lbPhotos = [];
+    let lbIndex = 0;
+
+    function openLightbox(photos, index) {
+      lbPhotos = photos;
+      lbIndex = index;
+      renderLightbox();
+    }
+
+    function renderLightbox() {
+      closeLightbox();
+      const p = lbPhotos[lbIndex];
+      if (!p) return;
+      const lb = el("div", { className: "lightbox", id: "lightbox" });
+      lb.onclick = (e) => { if (e.target === lb) closeLightbox(); };
+
+      lb.append(
+        el("button", { className: "lightbox-close", "aria-label": "Close", onclick: closeLightbox }, "\u00D7"),
+        el("img", { src: p.url, alt: safeText(p.label, "") }),
+        safeText(p.label, "") ? el("span", { className: "lightbox-caption" }, safeText(p.label, "")) : null
+      );
+      if (lbPhotos.length > 1) {
+        lb.append(
+          el("button", { className: "lightbox-nav lightbox-prev", onclick: () => { lbIndex = (lbIndex - 1 + lbPhotos.length) % lbPhotos.length; renderLightbox(); } }, "\u2039"),
+          el("button", { className: "lightbox-nav lightbox-next", onclick: () => { lbIndex = (lbIndex + 1) % lbPhotos.length; renderLightbox(); } }, "\u203A")
+        );
+      }
+      document.body.appendChild(lb);
+    }
+
+    function closeLightbox() {
+      const existing = document.getElementById("lightbox");
+      if (existing) existing.remove();
+    }
+
+    /* ─── Detail page ─── */
+    function renderDetail(listing, duplicates, relatedListings) {
+      const id = listing.externalId || listing._id;
+      const title = safeText(listing.title) || ("Listing " + safeText(id, "?"));
+      const price = fmt(listing.price || listing.total_price);
+      const area = listing.area_sqm || listing.area;
+      const rooms = listing.rooms ?? listing.bedrooms;
+      const floor = listing.floor;
+      const totalFloors = listing.total_floors;
+      const address = safeText(listing.address || listing.street || listing.location);
+      const district = safeText(listing.district);
+      const description = safeText(listing.description, "");
+      const photos = (listing.photos || []).filter((p) => p && p.url);
+      const dupIds = ((duplicates && duplicates.listingIds) || []).filter((x) => x !== id);
+      const pricePerSqm = (listing.price != null && area) ? Math.round(listing.price / area) : null;
+      const posted = timeAgo(listing.updatedAt);
+      const isFav = getFavorites().has(id);
+
+      const chips = [];
+      if (price) chips.push(el("div", { className: "chip" }, el("strong", {}, price)));
+      if (pricePerSqm) chips.push(el("div", { className: "chip" }, pricePerSqm.toLocaleString() + " GEL/m²"));
+      if (area) chips.push(el("div", { className: "chip" }, area + " m²"));
+      if (rooms != null) chips.push(el("div", { className: "chip" }, rooms + " room" + (rooms !== 1 ? "s" : "")));
+      if (floor != null) chips.push(el("div", { className: "chip" }, "Floor " + floor + (totalFloors != null ? " of " + totalFloors : "")));
+      if (address && address !== "\u2014") chips.push(el("div", { className: "chip" }, address));
+      if (district && district !== "\u2014") chips.push(el("div", { className: "chip" }, district));
+      if (posted) chips.push(el("div", { className: "chip" }, "Posted " + posted));
+
+      const shareBtn = el("button", { type: "button", className: "detail-actions-btn" }, "Share");
+      shareBtn.onclick = () => {
+        const url = window.location.origin + window.location.pathname + "#/listing/" + encodeURIComponent(id);
+        if (navigator.share) {
+          navigator.share({ title, url }).catch(() => { navigator.clipboard.writeText(url); });
+        } else {
+          navigator.clipboard.writeText(url);
+        }
+      };
+      const favBtn = el("button", { type: "button", className: "detail-actions-btn" }, isFav ? "♥ Saved" : "♡ Save");
+      if (isFav) favBtn.classList.add("active");
+      favBtn.onclick = () => { toggleFavorite(id); favBtn.textContent = getFavorites().has(id) ? "♥ Saved" : "♡ Save"; favBtn.classList.toggle("active", getFavorites().has(id)); };
+      const inCompare = getCompare().includes(id);
+      const compareBtn = el("button", { type: "button", className: "detail-actions-btn" }, inCompare ? "✓ In compare" : "+ Add to compare");
+      if (inCompare) compareBtn.classList.add("active");
+      compareBtn.onclick = () => { toggleCompare(id); compareBtn.textContent = getCompare().includes(id) ? "✓ In compare" : "+ Add to compare"; compareBtn.classList.toggle("active", getCompare().includes(id)); };
+
+      let heroEl = null;
+      if (photos.length >= 3) {
+        heroEl = el("div", { className: "detail-hero" },
+          makeHeroImg(photos, 0),
+          el("div", { className: "detail-hero-side" },
+            makeHeroImg(photos, 1),
+            makeHeroImg(photos, 2)
+          )
+        );
+      } else if (photos.length > 0) {
+        heroEl = el("div", { className: "detail-hero-single" },
+          makeHeroImg(photos, 0)
+        );
+      }
+
+      const recent = getRecent().filter((r) => r.id !== id);
+      const recentSection = recent.length
+        ? el("div", { className: "recently-viewed" },
+            el("h3", {}, "Recently viewed"),
+            el("div", { className: "list" }, recent.slice(0, 4).map((r) => {
+              const card = el("a", { href: "#/listing/" + encodeURIComponent(r.id), className: "card" });
+              const imgWrap = el("div", { className: "card-img" });
+              if (r.photo) {
+                const img = el("img", { src: r.photo, alt: "" });
+                img.onerror = () => { img.style.display = "none"; imgWrap.appendChild(el("div", { className: "no-photo" }, "—")); };
+                imgWrap.appendChild(img);
+              } else imgWrap.appendChild(el("div", { className: "no-photo" }, "—"));
+              card.append(imgWrap, el("div", { className: "card-body" }, el("div", { className: "card-title" }, safeText(r.title) || safeText(r.id, "?"))));
+              return card;
+            }))
+          )
+        : null;
+
+      const related = (relatedListings || []).filter((l) => (l.externalId || l._id) !== id);
+      const relatedSection = related.length
+        ? el("div", { className: "recently-viewed" },
+            el("h3", {}, "More in " + (district && district !== "\u2014" ? district : "this area")),
+            el("div", { className: "list" }, related.slice(0, 4).map((l) => {
+              const lid = l.externalId || l._id;
+              const card = el("a", { href: "#/listing/" + encodeURIComponent(lid), className: "card" });
+              const imgWrap = el("div", { className: "card-img" });
+              const photo = l.photos && l.photos[0];
+              if (photo && photo.url) {
+                const img = el("img", { src: photo.url, alt: "" });
+                img.onerror = () => { img.style.display = "none"; imgWrap.appendChild(el("div", { className: "no-photo" }, "—")); };
+                imgWrap.appendChild(img);
+              } else imgWrap.appendChild(el("div", { className: "no-photo" }, "—"));
+              card.append(imgWrap, el("div", { className: "card-body" }, el("div", { className: "card-title" }, safeText(l.title) || safeText(lid, "?")), l.price ? el("div", { className: "card-price card-price-small" }, fmt(l.price)) : null));
+              return card;
+            }))
+          )
+        : null;
+
+      const frag = el("div", { className: "detail" },
+        el("a", { href: "#", className: "back-link", "data-back": "1" }, "← Back to listings"),
+        heroEl,
+        el("h1", { className: "detail-title" }, title),
+        el("div", { className: "detail-actions" }, shareBtn, favBtn, compareBtn),
+        chips.length ? el("div", { className: "detail-chips" }, ...chips) : null,
+        description
+          ? el("div", { className: "detail-section" },
+              el("h3", {}, "Description"),
+              el("p", {}, description)
+            )
+          : null,
+        el("a", { href: "mailto:inquiries@example.com?subject=Inquiry: " + encodeURIComponent(title), className: "btn-contact" }, "Contact / Inquire"),
+        photos.length > 0
+          ? el("div", {},
+              el("p", { className: "photo-grid-title" }, "All Photos (" + photos.length + ")"),
+              el("div", { className: "photos" }, photos.map((p, i) => {
+                const wrap = el("div", { className: "photo-item", onclick: () => openLightbox(photos, i) });
+                const img = el("img", { src: p.url, alt: safeText(p.label, ""), loading: "lazy" });
+                img.onerror = function () { this.onerror = null; this.src = placeholderSvg(safeText(p.label, "")); };
+                wrap.append(img, el("span", { className: "label" }, safeText(p.label, "")));
+                return wrap;
+              }))
+            )
+          : null,
+        dupIds.length
+          ? el("div", { className: "duplicates" },
+              el("h3", {}, "Similar / Duplicate Listings"),
+              ...dupIds.map((x) => el("a", { href: "#/listing/" + encodeURIComponent(x) }, "Listing " + safeText(x, "?")))
+            )
+          : null,
+        relatedSection,
+        recentSection
+      );
+      return frag;
+    }
+
+    function makeHeroImg(photos, idx) {
+      const p = photos[idx];
+      const img = el("img", { src: p.url, alt: safeText(p.label, ""), className: "hero-img-clickable" });
+      img.onclick = () => openLightbox(photos, idx);
+      img.onerror = function () { this.onerror = null; this.src = placeholderSvg(safeText(p.label, "")); };
+      return img;
+    }
+
+    /* ─── Page loaders ─── */
+    async function showList(favoritesOnly) {
+      const app = document.getElementById("app");
+      if (favoritesOnly) {
+        const fav = getFavorites();
+        if (fav.size === 0) {
+          state.listings = [];
+          renderPage([], { favoritesPage: true });
+          updateHeader();
+          return;
+        }
+        app.innerHTML = '<div class="loading">Loading...</div>';
+        try {
+          const data = await apiGet(buildListingsUrl({ sort: "newest", limit: 200, skip: 0 }));
+          const all = data.listings || data;
+          state.listings = Array.isArray(all) ? all.filter((l) => fav.has(l.externalId || l._id)) : [];
+          renderPage(state.listings, { favoritesPage: true });
+        } catch (err) {
+          app.innerHTML = "";
+          app.append(
+            el("div", { className: "error" }, "Failed to load: " + err.message),
+            el("button", { className: "btn-retry", onclick: () => showList(true) }, "Retry")
+          );
+        }
+        updateHeader();
+        return;
+      }
+      app.innerHTML = '<div class="loading">Loading listings...</div>';
+      try {
+        await fetchAndRenderList();
+      } catch (err) {
+        state.listings = [];
+        app.innerHTML = "";
+        app.append(
+          el("div", { className: "error" }, "Failed to load: " + err.message),
+          el("button", { className: "btn-retry", onclick: fetchAndRenderList }, "Retry")
+        );
+      }
+      updateHeader();
+    }
+
+    function renderDetailSkeleton() {
+      return el("div", { className: "detail" },
+        el("div", { className: "skeleton skeleton-back" }),
+        el("div", { className: "skeleton skeleton-hero" }),
+        el("div", { className: "skeleton skeleton-title" }),
+        el("div", { className: "skeleton skeleton-sub" }),
+        el("div", { className: "skeleton skeleton-block" })
+      );
+    }
+
+    async function showListing(id) {
+      const app = document.getElementById("app");
+      app.innerHTML = "";
+      app.appendChild(renderDetailSkeleton());
+      try {
+        const [listing, dups, relatedRes] = await Promise.all([
+          apiGet("/api/listings/" + encodeURIComponent(id)),
+          apiGet("/api/listings/" + encodeURIComponent(id) + "/duplicates"),
+          apiGet("/api/listings/related/" + encodeURIComponent(id) + "?limit=4").catch(() => ({ listings: [] }))
+        ]);
+        const relatedListings = (relatedRes && relatedRes.listings) ? relatedRes.listings : [];
+        addRecent(id, { title: listing.title, photos: listing.photos });
+        app.innerHTML = "";
+        app.append(renderDetail(listing, dups, relatedListings));
+      } catch (err) {
+        app.innerHTML = "";
+        app.append(
+          el("div", { className: "error" }, "Failed to load: " + err.message),
+          el("button", { className: "btn-retry", onclick: () => showListing(id) }, "Retry"),
+          el("a", { href: "#", className: "back-link", "data-back": "1" }, "\u2190 Back to listings")
+        );
+      }
+      updateHeader();
+    }
+
+    function updateHeader() {
+      setFavorites(getFavorites());
+      const ids = getCompare();
+      const el = document.getElementById("compare-count");
+      if (el) el.textContent = ids.length;
+      const hash = (window.location.hash || "#").slice(1) || "/";
+      document.querySelectorAll(".header-nav a").forEach((a) => {
+        const href = a.getAttribute("href");
+        a.classList.toggle("active", (href === "#" && (hash === "" || hash === "/")) || (href === "#/favorites" && hash === "/favorites") || (href === "#/compare" && hash === "/compare"));
+      });
+    }
+
+    async function showComparePage() {
+      const app = document.getElementById("app");
+      const ids = getCompare();
+      if (ids.length === 0) {
+        app.innerHTML = "";
+        app.append(
+          el("h1", { className: "page-title" }, "Compare listings"),
+          el("p", { className: "page-subtitle" }, "Add up to 3 listings from the list or detail page to compare them side by side."),
+          el("div", { className: "empty" }, el("p", {}, "No listings to compare. Use \"+ Compare\" on any card to add it."))
+        );
+        updateHeader();
+        return;
+      }
+      app.innerHTML = '<div class="loading">Loading...</div>';
+      try {
+        const listings = await Promise.all(ids.map((id) => apiGet("/api/listings/" + encodeURIComponent(id)).catch(() => null)));
+        const valid = listings.filter(Boolean);
+        if (valid.length === 0) {
+          app.innerHTML = "";
+          app.append(el("div", { className: "error" }, "Could not load listings."));
+          updateHeader();
+          return;
+        }
+        const rows = [
+          ["Title", (l) => safeText(l.title) || safeText(l.externalId || l._id, "\u2014")],
+          ["Price", (l) => fmt(l.price)],
+          ["Price/m²", (l) => (l.price != null && (l.area_sqm || l.area)) ? Math.round(l.price / (l.area_sqm || l.area)) + " GEL/m²" : "\u2014"],
+          ["Area", (l) => (l.area_sqm || l.area) ? (l.area_sqm || l.area) + " m²" : "\u2014"],
+          ["Rooms", (l) => l.rooms != null ? l.rooms : "\u2014"],
+          ["Floor", (l) => l.floor != null ? (l.total_floors ? l.floor + " of " + l.total_floors : l.floor) : "\u2014"],
+          ["Address", (l) => safeText(l.address, "\u2014")],
+          ["District", (l) => safeText(l.district, "\u2014")],
+        ];
+        const table = el("table", { className: "compare-table" });
+        const thCells = valid.map((l) => {
+          const t = safeText(l.title) || safeText(l.externalId || l._id, "?");
+          const short = t.length > 30 ? t.substring(0, 30) + "\u2026" : t;
+          return el("th", {}, el("a", { href: "#/listing/" + encodeURIComponent(l.externalId || l._id) }, short));
+        });
+        const thead = el("thead", {}, el("tr", {}, el("th", {}, ""), ...thCells));
+        table.appendChild(thead);
+        const tbody = el("tbody");
+        rows.forEach(([label, fn]) => {
+          tbody.appendChild(el("tr", {}, el("td", {}, label), ...valid.map((l) => el("td", {}, safeText(fn(l), "\u2014")))));
+        });
+        table.appendChild(tbody);
+        app.innerHTML = "";
+        app.append(
+          el("a", { href: "#", className: "back-link", "data-back": "1" }, "← Back to listings"),
+          el("h1", { className: "page-title" }, "Compare listings"),
+          el("p", { className: "page-subtitle" }, "Side-by-side comparison of " + valid.length + " listing(s)."),
+          table
+        );
+      } catch (err) {
+        app.innerHTML = "";
+        app.append(el("div", { className: "error" }, "Failed to load: " + err.message), el("button", { className: "btn-retry", onclick: showComparePage }, "Retry"));
+      }
+      updateHeader();
+    }
+
+    /* ─── Router ─── */
+    function route() {
+      closeLightbox();
+      const hash = window.location.hash.slice(1) || "/";
+      const detailMatch = hash.match(/^\/listing\/(.+)$/);
+      if (detailMatch) showListing(decodeURIComponent(detailMatch[1]));
+      else if (hash === "/favorites") showList(true);
+      else if (hash === "/compare") showComparePage();
+      else showList(false);
+    }
+
+    window.addEventListener("hashchange", route);
+
+    document.addEventListener("click", (e) => {
+      const a = e.target.closest("a");
+      if (!a) return;
+      const href = a.getAttribute("href");
+      if (a.hasAttribute("data-back") || href === "#") {
+        e.preventDefault();
+        window.location.hash = "";
+        route();
+        return;
+      }
+      if (href && href.startsWith("#")) {
+        e.preventDefault();
+        window.location.hash = href.slice(1);
+      }
+    });
+
+    document.addEventListener("keydown", (e) => {
+      const lb = document.getElementById("lightbox");
+      if (!lb) return;
+      if (e.key === "Escape") closeLightbox();
+      if (e.key === "ArrowLeft") { lbIndex = (lbIndex - 1 + lbPhotos.length) % lbPhotos.length; renderLightbox(); }
+      if (e.key === "ArrowRight") { lbIndex = (lbIndex + 1) % lbPhotos.length; renderLightbox(); }
+    });
+
+    setCompare(getCompare());
+    route();
+  </script>
+</body>
+</html>
