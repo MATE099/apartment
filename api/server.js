@@ -9,7 +9,8 @@ import { connect, getListingsCollection, getDuplicateGroupsCollection } from "..
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
-const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 0;
+// Default 3000 matches README; override if busy: PORT=3001 npm run api
+const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 
 await connect();
 
