@@ -8,7 +8,12 @@
   },
   "scripts": {
     "start": "node src/pipeline.js",
-    "api": "node api/server.js"
+    "api": "node api/server.js",
+    "db:up": "docker start apartment-mongo || docker run -d --name apartment-mongo -p 27017:27017 -v apartment-mongo-data:/data/db mongo:7",
+    "db:down": "docker stop apartment-mongo",
+    "duplicates": "node src/test-step7.js",
+    "test:api": "node src/test-api.js",
+    "test:db": "node db/test-connection.js"
   },
   "keywords": [],
   "author": "",
@@ -17,6 +22,7 @@
     "@xenova/transformers": "^2.17.2",
     "dotenv": "^16.4.5",
     "express": "^4.21.0",
-    "mongodb": "^6.12.0"
+    "mongodb": "^6.12.0",
+    "puppeteer-core": "^23.11.1"
   }
 }
