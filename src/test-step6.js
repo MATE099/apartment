@@ -1,43 +1,43 @@
 /**
  * Test Step 6: fetch one listing → download photos → CLIP → renovated filter → save to DB.
  * Run: node src/test-step6.js
- * Requires: MongoDB running, .env with MONGODB_URI (optional).
+ * Requires: MongoDB running (npm run db:up).
  */
-import { connect, saveListing, close } from "../db/index.js";
-import { fetchPage, getItems, toListing } from "./api-client.js";
+import { connect, saveListing, saveRejected, close } from "../db/index.js";
+import { openSession, closeSession, fetchPage, toListing } from "./myhome-client.js";
 import { downloadListingPhotos } from "./photo-download.js";
 import { processPhotos } from "./clip.js";
-import { isRenovated } from "./renovated-filter.js";
+import { isRenovated, summarizeLabels } from "./renovated-filter.js";
 
+let session;
 try {
-  const data = await fetchPage(1);
-  const items = getItems(data);
-  const listing = items.length ? toListing(items[0]) : null;
-  if (!listing || !listing.photoUrls?.length) {
+  session = await openSession();
+  const items = await fetchPage(session, 1);
+  await closeSession(session);
+  const listing = items.map(toListing).find((l) => l.photos.length);
+  if (!listing) {
     console.log("No listing with photos on page 1.");
     process.exit(0);
   }
 
-  console.log("Listing id:", listing.id, "Photos:", listing.photoUrls.length);
-  const photos = await downloadListingPhotos(listing.photoUrls);
+  console.log("Listing:", listing.externalId, listing.title, "|", listing.price, "GEL |", listing.photos.length, "photos");
+  const photos = await downloadListingPhotos(listing.photos.map((p) => p.thumb));
   console.log("Downloaded:", photos.length);
-  if (!photos.length) {
-    console.log("No photos downloaded.");
-    process.exit(0);
-  }
 
   console.log("Running CLIP...");
   const clipResults = await processPhotos(photos);
+  clipResults.forEach((r) => console.log(" ", r.label.padEnd(26), r.score.toFixed(2), r.url.split("/").pop()));
+  const summary = summarizeLabels(clipResults);
   const pass = isRenovated(clipResults);
-  console.log("Renovated filter:", pass ? "PASS" : "SKIP (too many excluded labels)");
+  console.log("Renovated filter:", pass ? "PASS" : "SKIP (too many excluded labels)", summary.counts);
 
-  if (pass) {
-    await connect();
-    await saveListing(listing, clipResults);
-    console.log("Saved to MongoDB.");
-    await close();
-  }
+  await connect();
+  if (pass) await saveListing(listing, clipResults, summary);
+  else await saveRejected(listing, summary);
+  console.log("Saved to MongoDB.");
+  await close();
 } catch (err) {
   console.error(err);
+  await closeSession(session);
   process.exit(1);
 }

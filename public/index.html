@@ -51,11 +51,12 @@
       return e;
     }
 
-    function fmt(n) {
+    function fmt(n, currency) {
       if (n == null) return null;
       const num = typeof n === "number" ? n : parseInt(String(n).replace(/\D/g, ""), 10);
       if (isNaN(num)) return null;
-      return num.toLocaleString("en-US") + " GEL";
+      const suffix = (currency || "GEL").trim();
+      return num.toLocaleString("en-US") + (suffix ? " " + suffix : "");
     }
 
     /** Never show "null" or "undefined" on the page. Use for any API-sourced text. */
@@ -64,6 +65,16 @@
       const s = String(v).trim();
       if (s.toLowerCase() === "null" || s.toLowerCase() === "undefined") return (fallback != null ? fallback : "\u2014");
       return s || (fallback != null ? fallback : "\u2014");
+    }
+
+    function locationLine(listing) {
+      const parts = [safeText(listing.district, ""), safeText(listing.address, "")].filter(Boolean);
+      return parts.join(" · ");
+    }
+
+    function average(values) {
+      if (!values.length) return null;
+      return Math.round(values.reduce((sum, value) => sum + value, 0) / values.length);
     }
 
     /* SVG placeholder for broken images */
@@ -91,6 +102,7 @@
       if (params.minArea != null && params.minArea !== "") p.set("minArea", params.minArea);
       if (params.maxArea != null && params.maxArea !== "") p.set("maxArea", params.maxArea);
       if (params.rooms) p.set("rooms", params.rooms);
+      if (params.showDuplicates) p.set("showDuplicates", "1");
       if (params.sort) p.set("sort", params.sort);
       if (params.limit != null) p.set("limit", params.limit);
       if (params.skip != null) p.set("skip", params.skip);
@@ -211,10 +223,15 @@
       maxPrice: "",
       minArea: "",
       maxArea: "",
+      showDuplicates: false,
       viewMode: "grid",
       pageSize: 12,
       skip: 0,
     };
+
+    function usd(n) {
+      return n != null ? "$" + Number(n).toLocaleString("en-US") : null;
+    }
 
     /* ─── "Posted X ago" ─── */
     function timeAgo(date) {
@@ -227,6 +244,51 @@
       if (sec < 2592000) return Math.floor(sec / 86400) + " days ago";
       if (sec < 31536000) return Math.floor(sec / 2592000) + " months ago";
       return Math.floor(sec / 31536000) + " years ago";
+    }
+
+    function renderPageHeader(options, listings, total) {
+      if (options && options.favoritesPage) {
+        return el("section", { className: "page-hero page-hero-simple" },
+          el("span", { className: "page-eyebrow" }, "Saved shortlist"),
+          el("h1", { className: "page-title" }, "Favorites"),
+          el("p", { className: "page-subtitle" }, "Your saved listings, ready to revisit or compare.")
+        );
+      }
+
+      const priced = listings.filter((listing) => listing.price != null);
+      const sized = listings.filter((listing) => listing.area_sqm != null);
+      const avgPrice = average(priced.map((listing) => listing.price));
+      const avgArea = average(sized.map((listing) => listing.area_sqm));
+      const bestValue = listings
+        .filter((listing) => listing.pricePerSqm != null)
+        .sort((a, b) => a.pricePerSqm - b.pricePerSqm)[0];
+      const currency = priced[0]?.priceCurrency || "GEL";
+
+      return el("section", { className: "page-hero" },
+        el("div", { className: "page-hero-copy" },
+          el("span", { className: "page-eyebrow" }, "Tbilisi · Saburtalo"),
+          el("h1", { className: "page-title" }, "Renovated Apartments"),
+          el("p", { className: "page-subtitle" }, "A cleaner snapshot of saved listings with normalized prices, size, and room data.")
+        ),
+        el("div", { className: "hero-stats" },
+          el("div", { className: "hero-stat" },
+            el("span", { className: "hero-stat-label" }, "Saved listings"),
+            el("strong", { className: "hero-stat-value" }, total != null ? total : listings.length)
+          ),
+          el("div", { className: "hero-stat" },
+            el("span", { className: "hero-stat-label" }, "Avg. asking price"),
+            el("strong", { className: "hero-stat-value" }, avgPrice != null ? fmt(avgPrice, currency) : "—")
+          ),
+          el("div", { className: "hero-stat" },
+            el("span", { className: "hero-stat-label" }, "Avg. size"),
+            el("strong", { className: "hero-stat-value" }, avgArea != null ? avgArea + " m²" : "—")
+          ),
+          el("div", { className: "hero-stat" },
+            el("span", { className: "hero-stat-label" }, "Best value in view"),
+            el("strong", { className: "hero-stat-value" }, bestValue ? bestValue.pricePerSqm.toLocaleString() + " " + (bestValue.priceCurrency || "GEL") + "/m²" : "—")
+          )
+        )
+      );
     }
 
     /* ─── Render search + filters ─── */
@@ -273,6 +335,11 @@
       sortSelect.value = state.sortBy;
       sortSelect.onchange = function () { state.sortBy = this.value; fetchAndRenderList(); };
 
+      const dupCheckbox = el("input", { type: "checkbox" });
+      dupCheckbox.checked = state.showDuplicates;
+      dupCheckbox.onchange = function () { state.showDuplicates = this.checked; fetchAndRenderList(); };
+      const dupToggle = el("label", { className: "dup-toggle" }, dupCheckbox, " Show duplicates");
+
       const chips = [];
       if (state.searchQuery) chips.push(el("span", { className: "filter-chip" }, "“" + state.searchQuery + "”", el("button", { type: "button", onclick: () => { state.searchQuery = ""; searchInput.value = ""; fetchAndRenderList(); } }, "×")));
       if (state.minPrice || state.maxPrice) chips.push(el("span", { className: "filter-chip" }, (state.minPrice || "?") + "–" + (state.maxPrice || "?") + " GEL", el("button", { type: "button", onclick: () => { state.minPrice = state.maxPrice = ""; minPriceInput.value = maxPriceInput.value = ""; fetchAndRenderList(); } }, "×")));
@@ -294,6 +361,7 @@
         minPriceInput, maxPriceInput, minAreaInput, maxAreaInput,
         el("label", {}, "Rooms"), roomsSelect,
         el("label", {}, "Sort"), sortSelect,
+        dupToggle,
         viewToggle
       );
       const chipRow = chips.length ? el("div", { className: "filters-row filters-row-chips" }, ...chips) : null;
@@ -329,11 +397,12 @@
       const listEl = el("div", { className: "list" + (state.viewMode === "list" ? " list-view" : "") });
       listings.forEach((l) => {
         const photo = l.photos && l.photos[0];
-        const thumbUrl = photo ? photo.url : null;
+        const thumbUrl = photo ? (photo.thumb || photo.url) : null;
         const title = safeText(l.title) || ("Listing " + safeText(l.externalId || l._id, "?"));
-        const price = fmt(l.price || l.total_price);
+        const price = fmt(l.price || l.total_price, l.priceCurrency);
         const area = (l.area_sqm || l.area) ? (l.area_sqm || l.area) + " m\u00B2" : null;
         const rooms = l.rooms != null ? l.rooms + " room" + (l.rooms !== 1 ? "s" : "") : null;
+        const location = locationLine(l);
         const id = l.externalId || l._id;
         const pCount = l.photoCount ?? (l.photos ? l.photos.length : 0);
         const pricePerSqm = l.pricePerSqm || ((l.price != null && (l.area_sqm || l.area)) ? Math.round(l.price / (l.area_sqm || l.area)) : null);
@@ -357,17 +426,26 @@
           imgWrap.appendChild(el("div", { className: "no-photo" }, "No photo"));
         }
         if (pCount > 0) imgWrap.appendChild(el("span", { className: "card-badge" }, pCount + " photos"));
+        if (l.duplicateGroupSize) imgWrap.appendChild(el("span", { className: "card-badge card-badge-dup" }, (l.duplicateGroupSize - 1) + " duplicate" + (l.duplicateGroupSize > 2 ? "s" : "")));
+        else if (l.duplicateOf) imgWrap.appendChild(el("span", { className: "card-badge card-badge-dup" }, "Duplicate"));
 
         const card = el("a", { href: "#/listing/" + encodeURIComponent(id), className: "card" },
           imgWrap,
           el("div", { className: "card-body" },
-            price ? el("div", { className: "card-price" }, price) : null,
-            pricePerSqm ? el("div", { className: "card-price-sqm" }, pricePerSqm.toLocaleString() + " GEL/m²") : null,
+            el("div", { className: "card-price-row" },
+              price ? el("div", { className: "card-price" }, price) : el("div", { className: "card-price card-price-muted" }, "Price on request"),
+              pricePerSqm ? el("div", { className: "card-price-sqm" }, pricePerSqm.toLocaleString() + " " + (l.priceCurrency || "GEL") + "/m²") : null
+            ),
+            l.priceUsd ? el("div", { className: "card-price-usd" }, usd(l.priceUsd)) : null,
             el("div", { className: "card-title" }, title),
+            location ? el("div", { className: "card-location" }, location) : null,
             el("div", { className: "card-meta" },
               [area, rooms].filter(Boolean).map((t) => el("span", { className: "card-meta-item" }, t))
             ),
-            posted ? el("div", { className: "card-date" }, "Posted " + posted) : null
+            el("div", { className: "card-footer" },
+              posted ? el("div", { className: "card-date" }, "Updated " + posted) : el("div", { className: "card-date" }, "Recently saved"),
+              el("div", { className: "card-id" }, "ID " + safeText(id, "?"))
+            )
           )
         );
         listEl.appendChild(card);
@@ -385,8 +463,7 @@
       const showPagination = !(options && options.favoritesPage) && total > 0 && state.listings.length >= state.pageSize;
       const hasMore = state.listings.length < total;
       app.append(
-        el("h1", { className: "page-title" }, (options && options.favoritesPage) ? "Favorites" : "Renovated Apartments"),
-        el("p", { className: "page-subtitle" }, (options && options.favoritesPage) ? "Your saved listings." : "Search and filter renovated apartments in Tbilisi Saburtalo."),
+        renderPageHeader(options, list, total),
         (options && options.favoritesPage) ? null : renderSearchAndFilters(),
         el("div", { className: "toolbar toolbar-count-row" },
           el("span", { className: "count" }, total > 0 ? "Showing " + count + " of " + total : count + " listing" + (count !== 1 ? "s" : "")),
@@ -415,6 +492,7 @@
         minArea: state.minArea || undefined,
         maxArea: state.maxArea || undefined,
         rooms: state.filterRooms || undefined,
+        showDuplicates: state.showDuplicates,
         sort: state.sortBy,
         limit: state.pageSize,
         skip: state.skip,
@@ -504,7 +582,7 @@
     function renderDetail(listing, duplicates, relatedListings) {
       const id = listing.externalId || listing._id;
       const title = safeText(listing.title) || ("Listing " + safeText(id, "?"));
-      const price = fmt(listing.price || listing.total_price);
+      const price = fmt(listing.price || listing.total_price, listing.priceCurrency);
       const area = listing.area_sqm || listing.area;
       const rooms = listing.rooms ?? listing.bedrooms;
       const floor = listing.floor;
@@ -517,10 +595,12 @@
       const pricePerSqm = (listing.price != null && area) ? Math.round(listing.price / area) : null;
       const posted = timeAgo(listing.updatedAt);
       const isFav = getFavorites().has(id);
+      const sourceUrl = safeText(listing.sourceUrl, "");
 
       const chips = [];
       if (price) chips.push(el("div", { className: "chip" }, el("strong", {}, price)));
-      if (pricePerSqm) chips.push(el("div", { className: "chip" }, pricePerSqm.toLocaleString() + " GEL/m²"));
+      if (listing.priceUsd) chips.push(el("div", { className: "chip" }, el("strong", {}, usd(listing.priceUsd))));
+      if (pricePerSqm) chips.push(el("div", { className: "chip" }, pricePerSqm.toLocaleString() + " " + (listing.priceCurrency || "GEL") + "/m²"));
       if (area) chips.push(el("div", { className: "chip" }, area + " m²"));
       if (rooms != null) chips.push(el("div", { className: "chip" }, rooms + " room" + (rooms !== 1 ? "s" : "")));
       if (floor != null) chips.push(el("div", { className: "chip" }, "Floor " + floor + (totalFloors != null ? " of " + totalFloors : "")));
@@ -588,11 +668,11 @@
               const imgWrap = el("div", { className: "card-img" });
               const photo = l.photos && l.photos[0];
               if (photo && photo.url) {
-                const img = el("img", { src: photo.url, alt: "" });
+                const img = el("img", { src: photo.thumb || photo.url, alt: "" });
                 img.onerror = () => { img.style.display = "none"; imgWrap.appendChild(el("div", { className: "no-photo" }, "—")); };
                 imgWrap.appendChild(img);
               } else imgWrap.appendChild(el("div", { className: "no-photo" }, "—"));
-              card.append(imgWrap, el("div", { className: "card-body" }, el("div", { className: "card-title" }, safeText(l.title) || safeText(lid, "?")), l.price ? el("div", { className: "card-price card-price-small" }, fmt(l.price)) : null));
+              card.append(imgWrap, el("div", { className: "card-body" }, el("div", { className: "card-title" }, safeText(l.title) || safeText(lid, "?")), l.price ? el("div", { className: "card-price card-price-small" }, fmt(l.price, l.priceCurrency)) : null));
               return card;
             }))
           )
@@ -610,7 +690,9 @@
               el("p", {}, description)
             )
           : null,
-        el("a", { href: "mailto:inquiries@example.com?subject=Inquiry: " + encodeURIComponent(title), className: "btn-contact" }, "Contact / Inquire"),
+        sourceUrl && sourceUrl !== "\u2014"
+          ? el("a", { href: sourceUrl, className: "btn-contact", target: "_blank", rel: "noreferrer" }, "Open source listing")
+          : null,
         photos.length > 0
           ? el("div", {},
               el("p", { className: "photo-grid-title" }, "All Photos (" + photos.length + ")"),
@@ -625,8 +707,14 @@
           : null,
         dupIds.length
           ? el("div", { className: "duplicates" },
-              el("h3", {}, "Similar / Duplicate Listings"),
-              ...dupIds.map((x) => el("a", { href: "#/listing/" + encodeURIComponent(x) }, "Listing " + safeText(x, "?")))
+              el("h3", {}, "Duplicate listings (same apartment, matched by photos)"),
+              ...dupIds.map((x) => {
+                // Score = share of photos with a >85% CLIP match between the two listings.
+                const pair = (duplicates.pairs || []).find((p) => (p.a === id && p.b === x) || (p.b === id && p.a === x));
+                const match = pair ? " — " + Math.round(pair.score * 100) + "% photos match" : "";
+                const main = duplicates.primaryId === x ? " (main)" : "";
+                return el("a", { href: "#/listing/" + encodeURIComponent(x) }, "Listing " + safeText(x, "?") + main + match);
+              })
             )
           : null,
         relatedSection,
@@ -656,9 +744,9 @@
         }
         app.innerHTML = '<div class="loading">Loading...</div>';
         try {
-          const data = await apiGet(buildListingsUrl({ sort: "newest", limit: 200, skip: 0 }));
-          const all = data.listings || data;
-          state.listings = Array.isArray(all) ? all.filter((l) => fav.has(l.externalId || l._id)) : [];
+          // Load each favorite by id, so it works no matter how many listings exist.
+          const all = await Promise.all([...fav].map((favId) => apiGet("/api/listings/" + encodeURIComponent(favId)).catch(() => null)));
+          state.listings = all.filter(Boolean);
           renderPage(state.listings, { favoritesPage: true });
         } catch (err) {
           app.innerHTML = "";
@@ -756,8 +844,8 @@
         }
         const rows = [
           ["Title", (l) => safeText(l.title) || safeText(l.externalId || l._id, "\u2014")],
-          ["Price", (l) => fmt(l.price)],
-          ["Price/m²", (l) => (l.price != null && (l.area_sqm || l.area)) ? Math.round(l.price / (l.area_sqm || l.area)) + " GEL/m²" : "\u2014"],
+          ["Price", (l) => fmt(l.price, l.priceCurrency)],
+          ["Price/m²", (l) => (l.price != null && (l.area_sqm || l.area)) ? Math.round(l.price / (l.area_sqm || l.area)) + " " + (l.priceCurrency || "GEL") + "/m²" : "\u2014"],
           ["Area", (l) => (l.area_sqm || l.area) ? (l.area_sqm || l.area) + " m²" : "\u2014"],
           ["Rooms", (l) => l.rooms != null ? l.rooms : "\u2014"],
           ["Floor", (l) => l.floor != null ? (l.total_floors ? l.floor + " of " + l.total_floors : l.floor) : "\u2014"],

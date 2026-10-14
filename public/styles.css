@@ -311,6 +311,13 @@ body.has-compare-bar { padding-bottom: 60px; }
   padding: 4px 9px;
   border-radius: 20px;
 }
+.card-badge-dup {
+  top: auto;
+  bottom: 10px;
+  background: rgba(194, 120, 20, 0.9);
+}
+.card-price-usd { font-size: 0.85rem; color: var(--text-muted); font-weight: 600; }
+.dup-toggle { display: inline-flex; align-items: center; gap: 0.3rem; font-size: 0.85rem; cursor: pointer; }
 .card-body { padding: 1.1rem 1.2rem 1.3rem; display: flex; flex-direction: column; gap: 0.35rem; }
 .card-price { font-size: 1.15rem; font-weight: 700; color: var(--accent-dark); }
 .card-title { font-size: 0.95rem; font-weight: 600; color: var(--text); line-height: 1.35; }

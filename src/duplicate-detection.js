@@ -1,58 +1,60 @@
 /**
  * Step 7: Duplicate detection using CLIP embedding similarity.
- * Only between saved listings with >6 images. Two listings are duplicates if
- * ≥51% of one listing's images have cosine similarity > 0.85 to the other's.
+ * Only between saved listings with more than 6 photos. Two listings are duplicates if
+ * at least 51% of one listing's photos have a match in the other above SIM_THRESHOLD
+ * (DUPLICATE_SIM_THRESHOLD in .env, see config/index.js for why the default is 0.92).
  */
+import { config } from "../config/index.js";
 
-const SIM_THRESHOLD = 0.85;
-const MAJORITY_RATIO = 0.51;
+export const SIM_THRESHOLD = config.duplicates.similarityThreshold;
+export const MAJORITY_RATIO = 0.51;
+export const MIN_PHOTOS = 7; // "more than 6 images"
 
-function cosine(a, b) {
-  let dot = 0, la = 0, lb = 0;
-  for (let i = 0; i < a.length; i++) {
-    dot += a[i] * b[i];
-    la += a[i] * a[i];
-    lb += b[i] * b[i];
-  }
-  const d = Math.sqrt(la) * Math.sqrt(lb);
-  return d === 0 ? 0 : dot / d;
+/** Keeps only photos with an embedding and packs them as Float32Array for fast math. */
+function toVectors(photos) {
+  return (photos || [])
+    .filter((p) => Array.isArray(p.embedding) && p.embedding.length > 0)
+    .map((p) => Float32Array.from(p.embedding));
 }
 
-/** For each image in A, max similarity to any image in B. Returns fraction that are > threshold. */
-function fractionAboveThreshold(photosA, photosB, threshold) {
-  let count = 0;
-  for (const pa of photosA) {
-    const embA = pa.embedding;
-    if (!embA?.length) continue;
-    let maxSim = -1;
-    for (const pb of photosB) {
-      const embB = pb.embedding;
-      if (!embB?.length) continue;
-      const sim = cosine(embA, embB);
-      if (sim > maxSim) maxSim = sim;
+// Embeddings are stored unit-length, so the dot product equals cosine similarity.
+function dot(a, b) {
+  let sum = 0;
+  for (let i = 0; i < a.length; i++) sum += a[i] * b[i];
+  return sum;
+}
+
+/** Fraction of photos in A whose best match in B is above the threshold. */
+function matchedFraction(vectorsA, vectorsB) {
+  let matched = 0;
+  for (const a of vectorsA) {
+    for (const b of vectorsB) {
+      if (dot(a, b) > SIM_THRESHOLD) {
+        matched++;
+        break;
+      }
     }
-    if (maxSim > threshold) count++;
   }
-  return photosA.length ? count / photosA.length : 0;
+  return matched / vectorsA.length;
 }
 
 /**
- * Find all duplicate pairs from a list of listings (each with externalId and photos with embeddings).
- * Both listings must have >6 photos; callers should pass only such listings.
- * @param {Array<{ externalId: string, photos: Array<{ embedding: number[] }> }>} listings - From getListingsForDuplicateDetection().
- * @returns {Array<[string, string]>} Pairs of externalIds that are duplicates (each pair once, id order arbitrary).
+ * Find all duplicate pairs.
+ * @param {Array<{ externalId: string, photos: Array<{ embedding: number[] }> }>} listings
+ * @returns {Array<{ a: string, b: string, score: number }>} score = share of matching photos (0..1).
  */
 export function findDuplicatePairs(listings) {
+  const prepared = listings
+    .map((l) => ({ id: l.externalId, vectors: toVectors(l.photos) }))
+    .filter((l) => l.vectors.length >= MIN_PHOTOS);
+
   const pairs = [];
-  for (let i = 0; i < listings.length; i++) {
-    for (let j = i + 1; j < listings.length; j++) {
-      const a = listings[i];
-      const b = listings[j];
-      const fracA = fractionAboveThreshold(a.photos, b.photos, SIM_THRESHOLD);
-      const fracB = fractionAboveThreshold(b.photos, a.photos, SIM_THRESHOLD);
-      if (fracA >= MAJORITY_RATIO || fracB >= MAJORITY_RATIO) {
-        pairs.push([a.externalId, b.externalId]);
-      }
+  for (let i = 0; i < prepared.length; i++) {
+    for (let j = i + 1; j < prepared.length; j++) {
+      const a = prepared[i];
+      const b = prepared[j];
+      const score = Math.max(matchedFraction(a.vectors, b.vectors), matchedFraction(b.vectors, a.vectors));
+      if (score >= MAJORITY_RATIO) pairs.push({ a: a.id, b: b.id, score: Math.round(score * 100) / 100 });
     }
   }
   return pairs;
@@ -61,8 +63,7 @@ export function findDuplicatePairs(listings) {
 /**
  * Step 8: Turn duplicate pairs into groups (connected components).
  * If A-B and B-C are pairs, one group is [A, B, C].
- * @param {Array<[string, string]>} pairs - From findDuplicatePairs().
- * @returns {Array<string[]>} Each element is a list of externalIds in one duplicate group (size >= 2).
+ * @returns {Array<{ listingIds: string[], pairs: Array<{ a: string, b: string, score: number }> }>}
  */
 export function pairsToGroups(pairs) {
   const parent = new Map();
@@ -71,18 +72,18 @@ export function pairsToGroups(pairs) {
     if (parent.get(id) !== id) parent.set(id, find(parent.get(id)));
     return parent.get(id);
   }
-  function union(a, b) {
-    const ra = find(a), rb = find(b);
+  for (const { a, b } of pairs) {
+    const ra = find(a);
+    const rb = find(b);
     if (ra !== rb) parent.set(ra, rb);
   }
-  for (const [a, b] of pairs) {
-    union(a, b);
-  }
+
   const byRoot = new Map();
   for (const id of parent.keys()) {
-    const r = find(id);
-    if (!byRoot.has(r)) byRoot.set(r, []);
-    byRoot.get(r).push(id);
+    const root = find(id);
+    if (!byRoot.has(root)) byRoot.set(root, { listingIds: [], pairs: [] });
+    byRoot.get(root).listingIds.push(id);
   }
-  return [...byRoot.values()].filter((g) => g.length >= 2);
+  for (const pair of pairs) byRoot.get(find(pair.a)).pairs.push(pair);
+  return [...byRoot.values()].filter((g) => g.listingIds.length >= 2);
 }
